@@ -1,0 +1,31 @@
+{
+  "expo": {
+    "name": "Pantrypal",
+    "slug": "pantrypal",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "splash": {
+      "backgroundColor": "#F7F8F2"
+    },
+    "ios": {
+      "supportsTablet": true
+    },
+    "android": {
+      "adaptiveIcon": {
+        "backgroundColor": "#F7F8F2"
+      },
+      "package": "com.bugbytes.pantrypal"
+    },
+    "plugins": [
+      "expo-status-bar",
+      "expo-font"
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "59acb97d-ced1-4b4f-bad8-6648ebaed416"
+      }
+    },
+    "owner": "thebugbytes"
+  }
+}
