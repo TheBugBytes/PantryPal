@@ -47,23 +47,23 @@ The Expo entry point is `App.js`.
    npm install
    cp .env.example .env
    ```
-
-3. In `.env`, set `FDC_API_KEY`. To enable accounts, also set `EXPO_PUBLIC_SUPABASE_URL` and `EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY`.
-4. Start the local API server in one terminal:
-
-   ```sh
-   npm run api
-   ```
-
-5. Start Expo in a second terminal:
+3. Start Expo in a second terminal:
 
    ```sh
    npx expo start --clear
    ```
+   
+## Optional (Run your own api server locally and Supabase database)
+1. In `.env`, set `FDC_API_KEY`. To enable accounts, also set `EXPO_PUBLIC_SUPABASE_URL` and `EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY`.
+2. Start the local API server in one terminal:
 
+   ```sh
+   npm run api
+   ```
+   
 The sample API URL `http://localhost:3001` is for an iOS simulator. For a physical phone, set `EXPO_PUBLIC_API_URL` to the computer's LAN IP, such as `http://192.168.1.20:3001`. Keep both devices on the same network. Restart Expo after changing environment values.
 
-Pantry tracking works offline without an account. USDA nutrition and recipe search need an internet connection and the local API server.
+Pantry tracking works offline without an account. USDA nutrition and recipe search need an internet connection (or connection to the local API server.)
 
 ## Team
 
