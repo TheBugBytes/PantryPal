@@ -1,8 +1,13 @@
 create table if not exists public.pantry_snapshots (
   user_id uuid primary key references auth.users (id) on delete cascade,
   foods jsonb not null default '[]'::jsonb,
+  favorites jsonb not null default '[]'::jsonb,
   updated_at timestamptz not null default now()
 );
+
+-- Add this column to existing projects when the schema is run again.
+alter table public.pantry_snapshots
+  add column if not exists favorites jsonb not null default '[]'::jsonb;
 
 alter table public.pantry_snapshots enable row level security;
 

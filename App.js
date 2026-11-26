@@ -4,6 +4,7 @@ import {
   Alert,
   AppState,
   Image,
+  Platform,
   ScrollView,
   StatusBar,
   StyleSheet,
@@ -44,7 +45,7 @@ import {
   Trash2,
 } from 'lucide-react-native';
 import { supabase, supabaseConfigured } from './supabase';
-
+import { requestExpiryNotificationPermissions, syncExpiryReminders } from './expiryNotifications';
 // Keep the app's typography and colors in one place so screens stay visually consistent.
 const FONT = {
   fredokaRegular: 'Fredoka_400Regular',
@@ -77,7 +78,6 @@ const C = {
   rose: '#FFCCD3',
   shadow: '#202938',
 };
-
 // Expiry and calendar helpers
 function dateKey(date) {
   const year = date.getFullYear();
@@ -143,7 +143,23 @@ const categoryEmoji = {
   Meat: '🥩',
   Pantry: '🥫',
 };
-
+const QUANTITY_UNITS = [
+  { value: 'pcs', label: 'Pieces' },
+  { value: 'g', label: 'Grams' },
+  { value: 'kg', label: 'Kilograms' },
+  { value: 'oz', label: 'Ounces' },
+  { value: 'lb', label: 'Pounds' },
+  { value: 'mL', label: 'Milliliters' },
+  { value: 'L', label: 'Liters' },
+  { value: 'cup', label: 'Cups' },
+  { value: 'tbsp', label: 'Tablespoons' },
+  { value: 'tsp', label: 'Teaspoons' },
+];
+function quantityDescription(amount, unit) {
+  const quantity = amount.trim() || '1';
+  if (unit === 'pcs') return `${quantity} ${Number(quantity) === 1 ? 'piece' : 'pieces'}`;
+  return `${quantity} ${unit}`;
+}
 // The order here controls the bottom navigation layout.
 const tabs = [
   { key: 'Home', icon: 'home' },
@@ -163,15 +179,17 @@ function TabIcon({ name, color }) {
           : Settings;
   return <Icon size={28} color={color} strokeWidth={2} />;
 }
-
 // API and local persistence configuration
 const expoHost = Constants.expoConfig?.hostUri?.split(':')[0];
 const API_BASE = process.env.EXPO_PUBLIC_API_URL || `http://${expoHost || 'localhost'}:3001`;
 const PANTRY_STORAGE_KEY = 'pantrypal:foods:v1';
+const FAVORITES_STORAGE_KEY = 'pantrypal:recipe-favorites:v1';
 const PANTRY_OWNER_KEY = 'pantrypal:pantry-owner:v1';
 const PANTRY_UPDATED_KEY = 'pantrypal:pantry-updated:v1';
 const ACCESS_MODE_KEY = 'pantrypal:access-mode:v1';
 const PROFILE_ICON_KEY = 'pantrypal:profile-icon:v1';
+const EXPIRY_NOTIFICATIONS_KEY = 'pantrypal:expiry-notifications:v1';
+const REMINDER_LEAD_KEY = 'pantrypal:reminder-lead:v1';
 const PROFILE_ICONS = [
   '🥗',
   '🍎',
@@ -203,16 +221,33 @@ function parseSavedFoods(value) {
     return [];
   }
 }
+function parseSavedFavorites(value) {
+  if (!value) return [];
+  let parsed = value;
+  if (typeof value === 'string') {
+    try {
+      parsed = JSON.parse(value);
+    } catch {
+      return [];
+    }
+  }
+  return Array.isArray(parsed)
+    ? parsed.filter((recipe) => recipe && typeof recipe.id === 'string')
+    : [];
+}
 function mergePantryFoods(localFoods, remoteFoods) {
-    
   // Use IDs to combine snapshots; local copies win when an item exists in both places.
   const merged = new Map();
   remoteFoods.forEach((food) => merged.set(food.id, food));
   localFoods.forEach((food) => merged.set(food.id, food));
   return [...merged.values()];
 }
+function mergeFavorites(localFavorites, remoteFavorites) {
+  const merged = new Map(remoteFavorites.map((recipe) => [recipe.id, recipe]));
+  localFavorites.forEach((recipe) => merged.set(recipe.id, recipe));
+  return [...merged.values()];
+}
 async function fetchWithTimeout(url, options = {}) {
-    
   // Network requests should fail with a useful message instead of leaving a spinner running.
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 12000);
@@ -229,7 +264,6 @@ async function fetchWithTimeout(url, options = {}) {
     clearTimeout(timer);
   }
 }
-
 // Shared text, card, chip, and food-row components
 function fontFor(style) {
   const flatStyle = StyleSheet.flatten(style);
@@ -455,7 +489,6 @@ function RecipeCard({
     </Card>
   );
 }
-
 // Main application state, persistence, and screen layouts
 export default function App() {
   const [fontsLoaded] = useFonts({
@@ -468,7 +501,6 @@ export default function App() {
     Nunito_600SemiBold,
     Nunito_700Bold,
   });
-    
   // Authentication and sync state
   const [appMode, setAppMode] = useState('boot');
   const [sessionUser, setSessionUser] = useState(null);
@@ -488,14 +520,12 @@ export default function App() {
   const [accountSyncReady, setAccountSyncReady] = useState(false);
   const [pantryOwnerId, setPantryOwnerId] = useState(null);
   const [pantryUpdatedAt, setPantryUpdatedAt] = useState(0);
-    
   // Navigation and calendar state
   const [page, setPage] = useState('Home');
   const [expanded, setExpanded] = useState(false);
   const [calendarMonth, setCalendarMonth] = useState(() => dateKey(new Date()));
   const [selectedCalendarDate, setSelectedCalendarDate] = useState(() => dateKey(new Date()));
   const [expandedNutritionId, setExpandedNutritionId] = useState(null);
-    
   // Pantry, search, and recipe state
   const [foods, setFoods] = useState([]);
   const [pantryReady, setPantryReady] = useState(false);
@@ -506,14 +536,18 @@ export default function App() {
   const [sortMenuOpen, setSortMenuOpen] = useState(false);
   const [favorites, setFavorites] = useState([]);
   const [favoritesOnly, setFavoritesOnly] = useState(false);
-  const [notifications, setNotifications] = useState(true);
+  const [notifications, setNotifications] = useState(false);
   const [reminderLead, setReminderLead] = useState('3 days');
+  const [notificationPermissionBusy, setNotificationPermissionBusy] = useState(false);
+  const [notificationError, setNotificationError] = useState('');
   const [expiryDate, setExpiryDate] = useState(() => dateKeyFromToday(7));
   const [expiryPickerMonth, setExpiryPickerMonth] = useState(() => dateKeyFromToday(7));
   const [expiryPickerOpen, setExpiryPickerOpen] = useState(false);
   const [foodName, setFoodName] = useState('');
   const [foodEmoji, setFoodEmoji] = useState('🥕');
   const [foodQty, setFoodQty] = useState('1');
+  const [foodQtyUnit, setFoodQtyUnit] = useState('pcs');
+  const [unitPickerOpen, setUnitPickerOpen] = useState(false);
   const [foodCategory, setFoodCategory] = useState('Produce');
   const [usdaFoods, setUsdaFoods] = useState([]);
   const [selectedUsdaFood, setSelectedUsdaFood] = useState(null);
@@ -529,33 +563,51 @@ export default function App() {
   const [recipesError, setRecipesError] = useState('');
   const [openRecipe, setOpenRecipe] = useState(null);
   const [openRecipeNutrition, setOpenRecipeNutrition] = useState(null);
-    
-  // Load and merge the per-user cloud snapshot with this device's pantry.
-  const synchronizePantry = async (user, localFoods, localOwnerId, localUpdatedAt) => {
+  // Load and merge this device's pantry and saved recipes with the account snapshot.
+  const synchronizePantry = async (
+    user,
+    localFoods,
+    localFavorites,
+    localOwnerId,
+    localUpdatedAt,
+  ) => {
     if (!supabase) return false;
     setSyncing(true);
     try {
       const { data, error } = await supabase
         .from('pantry_snapshots')
-        .select('foods, updated_at')
+        .select('foods, favorites, updated_at')
         .eq('user_id', user.id)
         .maybeSingle();
       if (error) throw error;
       const remoteFoods = Array.isArray(data?.foods) ? data.foods : [];
+      const remoteFavorites = parseSavedFavorites(data?.favorites);
       const remoteUpdatedAt = data?.updated_at ? Date.parse(data.updated_at) : 0;
-        
       // Keep the newer account snapshot, except when switching accounts or merging guest data.
       let nextFoods;
-      if (!data) nextFoods = localFoods;
-      else if (localOwnerId && localOwnerId !== user.id) nextFoods = remoteFoods;
-      else if (localOwnerId === user.id && localUpdatedAt > remoteUpdatedAt) nextFoods = localFoods;
-      else if (!localOwnerId) nextFoods = mergePantryFoods(localFoods, remoteFoods);
-      else nextFoods = remoteFoods;
+      let nextFavorites;
+      if (!data) {
+        nextFoods = localFoods;
+        nextFavorites = localFavorites;
+      } else if (localOwnerId && localOwnerId !== user.id) {
+        nextFoods = remoteFoods;
+        nextFavorites = remoteFavorites;
+      } else if (localOwnerId === user.id && localUpdatedAt > remoteUpdatedAt) {
+        nextFoods = localFoods;
+        nextFavorites = localFavorites;
+      } else if (!localOwnerId) {
+        nextFoods = mergePantryFoods(localFoods, remoteFoods);
+        nextFavorites = mergeFavorites(localFavorites, remoteFavorites);
+      } else {
+        nextFoods = remoteFoods;
+        nextFavorites = remoteFavorites;
+      }
       const now = Date.now();
       const { error: saveError } = await supabase.from('pantry_snapshots').upsert(
         {
           user_id: user.id,
           foods: nextFoods,
+          favorites: nextFavorites,
           updated_at: new Date(now).toISOString(),
         },
         { onConflict: 'user_id' },
@@ -563,10 +615,12 @@ export default function App() {
       if (saveError) throw saveError;
       await AsyncStorage.multiSet([
         [PANTRY_STORAGE_KEY, JSON.stringify(nextFoods)],
+        [FAVORITES_STORAGE_KEY, JSON.stringify(nextFavorites)],
         [PANTRY_OWNER_KEY, user.id],
         [PANTRY_UPDATED_KEY, String(now)],
       ]);
       setFoods(nextFoods);
+      setFavorites(nextFavorites);
       setPantryOwnerId(user.id);
       setPantryUpdatedAt(now);
       setAccountSyncReady(true);
@@ -574,6 +628,7 @@ export default function App() {
       return true;
     } catch {
       setFoods(localFoods);
+      setFavorites(localFavorites);
       setAccountSyncReady(false);
       setPantryError('Cloud sync is unavailable. Your pantry is saved on this device.');
       return false;
@@ -586,23 +641,40 @@ export default function App() {
     let active = true;
     const initialize = async () => {
       let localFoods = [];
+      let localFavorites = [];
       let ownerId = null;
       let updatedAt = 0;
       let storedMode = null;
       try {
-        const [storedFoods, storedOwner, storedUpdatedAt, mode, storedProfileIcon] =
-          await AsyncStorage.multiGet([
-            PANTRY_STORAGE_KEY,
-            PANTRY_OWNER_KEY,
-            PANTRY_UPDATED_KEY,
-            ACCESS_MODE_KEY,
-            PROFILE_ICON_KEY,
-          ]);
+        const [
+          storedFoods,
+          storedFavorites,
+          storedOwner,
+          storedUpdatedAt,
+          mode,
+          storedProfileIcon,
+          storedNotifications,
+          storedReminderLead,
+        ] = await AsyncStorage.multiGet([
+          PANTRY_STORAGE_KEY,
+          FAVORITES_STORAGE_KEY,
+          PANTRY_OWNER_KEY,
+          PANTRY_UPDATED_KEY,
+          ACCESS_MODE_KEY,
+          PROFILE_ICON_KEY,
+          EXPIRY_NOTIFICATIONS_KEY,
+          REMINDER_LEAD_KEY,
+        ]);
         localFoods = parseSavedFoods(storedFoods[1]);
+        localFavorites = parseSavedFavorites(storedFavorites[1]);
         ownerId = storedOwner[1];
         updatedAt = Number(storedUpdatedAt[1] || 0);
         storedMode = mode[1];
         if (storedProfileIcon?.[1]) setProfileIcon(storedProfileIcon[1]);
+        setNotifications(storedNotifications?.[1] === 'true');
+        if (['1 day', '3 days', '1 week'].includes(storedReminderLead?.[1])) {
+          setReminderLead(storedReminderLead[1]);
+        }
         // Import an existing development-server pantry once, so switching to device storage keeps current items.
         if (!storedFoods[1]) {
           const controller = new AbortController();
@@ -640,10 +712,12 @@ export default function App() {
         if (typeof session.user_metadata?.avatar_icon === 'string')
           setProfileIcon(session.user_metadata.avatar_icon);
         setFoods(localFoods);
-        await synchronizePantry(session, localFoods, ownerId, updatedAt);
+        setFavorites(localFavorites);
+        await synchronizePantry(session, localFoods, localFavorites, ownerId, updatedAt);
         if (active) setAppMode('account');
       } else {
         setFoods(localFoods);
+        setFavorites(localFavorites);
         setAccountSyncReady(false);
         setAppMode(storedMode === 'guest' ? 'guest' : 'auth');
       }
@@ -655,12 +729,13 @@ export default function App() {
     };
   }, []);
   useEffect(() => {
-    // Save every pantry change locally, then debounce cloud writes while signed in.
+    // Save pantry and favorites locally, then debounce account snapshot writes.
     if (!pantryReady) return;
     const updatedAt = Date.now();
     setPantryUpdatedAt(updatedAt);
     void AsyncStorage.multiSet([
       [PANTRY_STORAGE_KEY, JSON.stringify(foods)],
+      [FAVORITES_STORAGE_KEY, JSON.stringify(favorites)],
       [PANTRY_UPDATED_KEY, String(updatedAt)],
     ]).catch(() => setPantryError('Could not save your pantry on this device.'));
     const client = supabase;
@@ -671,19 +746,55 @@ export default function App() {
         {
           user_id: sessionUser.id,
           foods,
+          favorites,
           updated_at: new Date().toISOString(),
         },
         { onConflict: 'user_id' },
       );
       if (error)
         setPantryError(
-          'Cloud sync failed. Your pantry is still saved on this device; tap Sync now when online.',
+          'Cloud sync failed. Your changes are still saved on this device; tap Sync now when online.',
         );
       else setPantryError('');
       setSyncing(false);
     }, 500);
     return () => clearTimeout(timer);
-  }, [foods, pantryReady, appMode, sessionUser?.id, accountSyncReady]);
+  }, [foods, favorites, pantryReady, appMode, sessionUser?.id, accountSyncReady]);
+  useEffect(() => {
+    // Keep the device's scheduled reminders aligned with the saved pantry and profile settings.
+    if (!pantryReady) return;
+
+    let active = true;
+    const reconcileReminders = async () => {
+      const result = await syncExpiryReminders(foods, notifications, reminderLead);
+      if (!active) return;
+
+      if (notifications && !result.permissionGranted) {
+        setNotifications(false);
+        await AsyncStorage.setItem(EXPIRY_NOTIFICATIONS_KEY, 'false').catch(() => {});
+        setNotificationError('Allow notifications in device settings to receive expiry reminders.');
+      } else if (notifications) {
+        setNotificationError('');
+      }
+    };
+
+    void reconcileReminders().catch(() => {
+      if (active) setNotificationError('Could not update your expiry reminders.');
+    });
+
+    const subscription = AppState.addEventListener('change', (state) => {
+      if (state === 'active') {
+        void reconcileReminders().catch(() => {
+          if (active) setNotificationError('Could not update your expiry reminders.');
+        });
+      }
+    });
+
+    return () => {
+      active = false;
+      subscription.remove();
+    };
+  }, [foods, notifications, reminderLead, pantryReady]);
   useEffect(() => {
     // Reflect sign-in and sign-out events initiated outside this screen.
     const client = supabase;
@@ -748,7 +859,6 @@ export default function App() {
       clearTimeout(timer);
     };
   }, [page, foodName, selectedUsdaFood]);
-    
   // Values derived from current state for the home calendar and filtered lists.
   const today = new Date();
   const todayKey = dateKey(today);
@@ -770,7 +880,9 @@ export default function App() {
     [foods, category, query],
   );
   const filteredRecipes = favoritesOnly
-    ? recipes.filter((recipe) => favorites.includes(recipe.id))
+    ? favorites.filter((recipe) =>
+        recipe.title?.toLowerCase().includes(recipeSearch.trim().toLowerCase()),
+      )
     : recipes;
   const expiring = foods
     .filter((food) => food.days >= 0 && food.days <= 3)
@@ -779,6 +891,11 @@ export default function App() {
   useEffect(() => {
     // Load recipes by search term, or recommend recipes from the first five pantry foods.
     if (page !== 'Recipes') return;
+    if (favoritesOnly) {
+      setRecipesLoading(false);
+      setRecipesError('');
+      return;
+    }
     const search = recipeSearch.trim();
     if (!search && foods.length === 0) {
       setRecipes([]);
@@ -821,8 +938,7 @@ export default function App() {
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [page, recipeSearch, foods]);
-    
+  }, [page, recipeSearch, foods, favoritesOnly]);
   // Nutrition lookup helpers connect a pantry item to USDA data and save the chosen match.
   const findPantryNutrition = async (food) => {
     setPantryLookupFoodId(food.id);
@@ -895,7 +1011,6 @@ export default function App() {
       setPantryLookupLoading(false);
     }
   };
-    
   // Pantry actions
   const addFood = () => {
     if (!foodName.trim()) return;
@@ -909,7 +1024,7 @@ export default function App() {
         name: foodName.trim(),
         category: foodCategory,
         emoji: foodEmoji || categoryEmoji[foodCategory] || '🥕',
-        qty: `${foodQty || '1'} pcs`,
+        qty: quantityDescription(foodQty, foodQtyUnit),
         days,
         expiresOn: expiryDate,
         opened: false,
@@ -926,6 +1041,7 @@ export default function App() {
       ...current,
     ]);
     setFoodName('');
+    setUnitPickerOpen(false);
     setFoodEmoji(categoryEmoji[foodCategory] || '🥕');
     setUsdaFoods([]);
     setSelectedUsdaFood(null);
@@ -958,7 +1074,34 @@ export default function App() {
       },
     ]);
   };
-    
+  const toggleExpiryNotifications = async () => {
+    setNotificationError('');
+    if (notifications) {
+      setNotifications(false);
+      await AsyncStorage.setItem(EXPIRY_NOTIFICATIONS_KEY, 'false').catch(() => {});
+      return;
+    }
+
+    setNotificationPermissionBusy(true);
+    try {
+      const permissionGranted = await requestExpiryNotificationPermissions();
+      if (!permissionGranted) {
+        setNotificationError('Allow notifications in device settings to receive expiry reminders.');
+        return;
+      }
+
+      setNotifications(true);
+      await AsyncStorage.setItem(EXPIRY_NOTIFICATIONS_KEY, 'true').catch(() => {});
+    } catch {
+      setNotificationError('Could not enable notifications. Please try again.');
+    } finally {
+      setNotificationPermissionBusy(false);
+    }
+  };
+  const updateReminderLead = async (value) => {
+    setReminderLead(value);
+    await AsyncStorage.setItem(REMINDER_LEAD_KEY, value).catch(() => {});
+  };
   // Account actions
   const continueAsGuest = async () => {
     await AsyncStorage.setItem(ACCESS_MODE_KEY, 'guest');
@@ -1010,7 +1153,7 @@ export default function App() {
       setAppMode('account');
       setAuthPassword('');
       setAuthConfirmPassword('');
-      await synchronizePantry(user, foods, pantryOwnerId, pantryUpdatedAt);
+      await synchronizePantry(user, foods, favorites, pantryOwnerId, pantryUpdatedAt);
     } catch (error) {
       setAuthError(
         error instanceof Error
@@ -1023,19 +1166,26 @@ export default function App() {
   };
   const syncNow = async () => {
     if (!sessionUser) return;
-    await synchronizePantry(sessionUser, foods, pantryOwnerId, pantryUpdatedAt);
+    await synchronizePantry(sessionUser, foods, favorites, pantryOwnerId, pantryUpdatedAt);
   };
   useEffect(() => {
-      
     // Refresh the account pantry when the app returns to the foreground.
     if (appMode !== 'account' || !sessionUser || !accountSyncReady) return;
     const subscription = AppState.addEventListener('change', (state) => {
       if (state === 'active') {
-        void synchronizePantry(sessionUser, foods, pantryOwnerId, pantryUpdatedAt);
+        void synchronizePantry(sessionUser, foods, favorites, pantryOwnerId, pantryUpdatedAt);
       }
     });
     return () => subscription.remove();
-  }, [appMode, sessionUser?.id, accountSyncReady, foods, pantryOwnerId, pantryUpdatedAt]);
+  }, [
+    appMode,
+    sessionUser?.id,
+    accountSyncReady,
+    foods,
+    favorites,
+    pantryOwnerId,
+    pantryUpdatedAt,
+  ]);
   const logOut = async () => {
     if (supabase) await supabase.auth.signOut({ scope: 'local' });
     await AsyncStorage.removeItem(ACCESS_MODE_KEY);
@@ -1125,7 +1275,6 @@ export default function App() {
       setClearingPantry(false);
     }
   };
-    
   // Keep screen renderers inside App so keystrokes do not replace inputs and steal focus.
   // Each renderer contains the layout and interactions for one destination.
   // Home shows calendar activity, items nearing expiry, and a shortcut to recipes.
@@ -1309,7 +1458,6 @@ export default function App() {
       </Card>
     </>
   );
-    
   // Pantry supports search, category filters, expiry actions, and nutrition details.
   const renderPantry = () => (
     <>
@@ -1546,7 +1694,6 @@ export default function App() {
       </Text>
     </>
   );
-    
   // Recipes can be searched, matched against pantry items, and saved as favorites.
   const renderRecipes = () => (
     <>
@@ -1563,7 +1710,9 @@ export default function App() {
         />
       </View>
       <View style={s.sectionRow}>
-        <Text style={s.sectionTitle}>A good match today</Text>
+        <Text style={s.sectionTitle}>
+          {favoritesOnly ? 'Your favorites' : 'A good match today'}
+        </Text>
         <TouchableOpacity
           style={[s.favoritesFilter, favoritesOnly && s.favoritesFilterActive]}
           onPress={() => setFavoritesOnly((value) => !value)}
@@ -1581,20 +1730,22 @@ export default function App() {
           </Text>
         </TouchableOpacity>
       </View>
-      {recipesLoading ? <ActivityIndicator color={C.green} style={s.loading} /> : null}
-      {recipesError ? <Text style={s.apiError}>{recipesError}</Text> : null}
+      {!favoritesOnly && recipesLoading ? (
+        <ActivityIndicator color={C.green} style={s.loading} />
+      ) : null}
+      {!favoritesOnly && recipesError ? <Text style={s.apiError}>{recipesError}</Text> : null}
       {filteredRecipes.map((recipe) => (
         <RecipeCard
           key={recipe.id}
           item={recipe}
-          saved={favorites.includes(recipe.id)}
+          saved={favorites.some((favorite) => favorite.id === recipe.id)}
           instructionsOpen={openRecipe === recipe.id}
           nutritionOpen={openRecipeNutrition === recipe.id}
           onToggleFavorite={() =>
             setFavorites((current) =>
-              current.includes(recipe.id)
-                ? current.filter((id) => id !== recipe.id)
-                : [...current, recipe.id],
+              current.some((favorite) => favorite.id === recipe.id)
+                ? current.filter((favorite) => favorite.id !== recipe.id)
+                : [...current, recipe],
             )
           }
           onToggleInstructions={() =>
@@ -1605,7 +1756,7 @@ export default function App() {
           }
         />
       ))}
-      {!recipesLoading && !recipesError && !filteredRecipes.length ? (
+      {(favoritesOnly || (!recipesLoading && !recipesError)) && !filteredRecipes.length ? (
         <Card style={s.emptyDayCard}>
           <Text style={s.foodSub}>
             {recipeSearch
@@ -1618,7 +1769,6 @@ export default function App() {
       ) : null}
     </>
   );
-    
   // The add form collects food details and an expiry date before saving the item.
   const renderAdd = () => (
     <>
@@ -1711,15 +1861,62 @@ export default function App() {
               keyboardType="decimal-pad"
               placeholder="1"
               style={s.fieldInput}
+              accessibilityLabel="Food quantity"
             />
           </View>
           <View style={s.formSpacer} />
+          <View style={s.formHalf}>
+            <Text style={s.fieldLabel}>UNIT</Text>
+            <TouchableOpacity
+              style={[s.unitSelect, unitPickerOpen && s.unitSelectActive]}
+              onPress={() => setUnitPickerOpen((open) => !open)}
+              accessibilityRole="button"
+              accessibilityLabel={`Quantity unit, currently ${QUANTITY_UNITS.find((unit) => unit.value === foodQtyUnit)?.label || foodQtyUnit}`}
+              accessibilityState={{ expanded: unitPickerOpen }}
+            >
+              <Text style={s.unitSelectText} numberOfLines={1}>
+                {QUANTITY_UNITS.find((unit) => unit.value === foodQtyUnit)?.label || 'Pieces'} (
+                {foodQtyUnit})
+              </Text>
+              {unitPickerOpen ? (
+                <ChevronUp size={17} color={C.green} />
+              ) : (
+                <ChevronDown size={17} color={C.muted} />
+              )}
+            </TouchableOpacity>
+          </View>
+        </View>
+        {unitPickerOpen ? (
+          <View style={s.unitOptions}>
+            {QUANTITY_UNITS.map((unit) => (
+              <TouchableOpacity
+                key={unit.value}
+                style={[s.unitOption, foodQtyUnit === unit.value && s.unitOptionActive]}
+                onPress={() => {
+                  setFoodQtyUnit(unit.value);
+                  setUnitPickerOpen(false);
+                }}
+                accessibilityRole="button"
+                accessibilityLabel={unit.label}
+                accessibilityState={{ selected: foodQtyUnit === unit.value }}
+              >
+                <Text
+                  style={[s.unitOptionText, foodQtyUnit === unit.value && s.unitOptionTextActive]}
+                >
+                  {unit.label} ({unit.value})
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+        ) : null}
+        <View style={[s.formLine, s.symbolRow]}>
           <View style={s.formHalf}>
             <Text style={s.fieldLabel}>FOOD SYMBOL</Text>
             <TextInput
               value={foodEmoji}
               onChangeText={setFoodEmoji}
               style={[s.fieldInput, s.emojiInput]}
+              accessibilityLabel="Food symbol"
             />
           </View>
         </View>
@@ -1834,7 +2031,6 @@ export default function App() {
       </Text>
     </>
   );
-    
   // Sign-in and sign-up share this screen; guest mode is available without Supabase.
   const renderAuth = () => (
     <View style={s.authScreen}>
@@ -1938,7 +2134,6 @@ export default function App() {
       </Text>
     </View>
   );
-    
   // Profile contains reminder preferences, account actions, and pantry sync controls.
   const renderProfile = () => (
     <>
@@ -2019,30 +2214,46 @@ export default function App() {
       {profileIconError ? <Text style={s.apiError}>{profileIconError}</Text> : null}
       <Text style={s.sectionTitle}>Preferences</Text>
       <Card style={s.settingsCard}>
-        <View style={s.settingRow}>
-          <View>
-            <Text style={s.foodName}>Expiry reminders</Text>
-            <Text style={s.foodSub}>Get a heads-up before food expires</Text>
-          </View>
-          <TouchableOpacity
-            style={[s.toggle, notifications && s.toggleOn]}
-            onPress={() => setNotifications((value) => !value)}
-          >
-            <View style={[s.toggleKnob, notifications && s.knobOn]} />
-          </TouchableOpacity>
-        </View>
-        <View style={s.separator} />
-        <Text style={s.fieldLabel}>REMIND ME</Text>
-        <View style={s.expiryChoices}>
-          {['1 day', '3 days', '1 week'].map((value) => (
-            <Chip
-              key={value}
-              label={value}
-              active={reminderLead === value}
-              onPress={() => setReminderLead(value)}
-            />
-          ))}
-        </View>
+        {Platform.OS === 'web' ? (
+          <Text style={s.foodSub}>
+            Local expiry reminders are available in the Android and iOS apps.
+          </Text>
+        ) : (
+          <>
+            <View style={s.settingRow}>
+              <View>
+                <Text style={s.foodName}>Expiry reminders</Text>
+                <Text style={s.foodSub}>Get a reminder at 9 AM on your selected day</Text>
+              </View>
+              <TouchableOpacity
+                style={[s.toggle, notifications && s.toggleOn]}
+                onPress={toggleExpiryNotifications}
+                disabled={notificationPermissionBusy}
+                accessibilityRole="switch"
+                accessibilityLabel="Expiry reminders"
+                accessibilityState={{
+                  checked: notifications,
+                  disabled: notificationPermissionBusy,
+                }}
+              >
+                <View style={[s.toggleKnob, notifications && s.knobOn]} />
+              </TouchableOpacity>
+            </View>
+            {notificationError ? <Text style={s.apiError}>{notificationError}</Text> : null}
+            <View style={s.separator} />
+            <Text style={s.fieldLabel}>REMIND ME</Text>
+            <View style={s.expiryChoices}>
+              {['1 day', '3 days', '1 week'].map((value) => (
+                <Chip
+                  key={value}
+                  label={value}
+                  active={reminderLead === value}
+                  onPress={() => updateReminderLead(value)}
+                />
+              ))}
+            </View>
+          </>
+        )}
       </Card>
       {sessionUser ? (
         <>
@@ -2111,7 +2322,6 @@ export default function App() {
       </SafeAreaProvider>
     );
   }
-    
   // Route to the selected screen; keep the shared tab bar outside the screen renderers.
   const content =
     page === 'Home'
@@ -2163,7 +2373,6 @@ export default function App() {
     </SafeAreaProvider>
   );
 }
-
 // Shared visual styles
 const s = StyleSheet.create({
   safe: { flex: 1, backgroundColor: C.paper },
@@ -2681,6 +2890,46 @@ const s = StyleSheet.create({
   formLine: { flexDirection: 'row' },
   formHalf: { flex: 1 },
   formSpacer: { width: 20 },
+  unitSelect: {
+    height: 45,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 5,
+    paddingHorizontal: 10,
+    borderWidth: 1,
+    borderColor: C.line,
+    borderRadius: 12,
+    backgroundColor: C.white,
+  },
+  unitSelectActive: { borderColor: C.green },
+  unitSelectText: { flex: 1, fontSize: 11, color: C.ink },
+  unitOptions: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'space-between',
+    gap: 7,
+    padding: 10,
+    marginTop: 8,
+    borderWidth: 1,
+    borderColor: C.line,
+    borderRadius: 12,
+    backgroundColor: C.white,
+  },
+  unitOption: {
+    width: '48%',
+    minHeight: 38,
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 5,
+    borderWidth: 1,
+    borderColor: C.line,
+    borderRadius: 10,
+  },
+  unitOptionActive: { backgroundColor: C.greenSoft, borderColor: C.greenSoft },
+  unitOptionText: { fontSize: 10, color: C.muted, textAlign: 'center' },
+  unitOptionTextActive: { color: C.greenInk, fontWeight: '700' },
+  symbolRow: { marginTop: 0 },
   emojiInput: { textAlign: 'center', fontSize: 22 },
   expiryDateInput: {
     minHeight: 62,

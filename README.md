@@ -6,19 +6,23 @@ Pantrypal is an Expo and React Native app for tracking pantry items and expiry d
 
 - Home calendar with weekly and monthly expiry views
 - Searchable pantry with food categories, expiry status, nutrition details, and item removal
-- Add-food form with quantity, category, symbol, and expiry date
+- Add-food form with quantity units, category, symbol, and expiry date
 - Recipe search, pantry ingredient matching, and favorites
+- Optional local expiry reminders with a selectable lead time
 - Guest mode with local pantry storage
 - Optional Supabase accounts and pantry sync across devices
-- USDA FoodData Central and TheMealDB access through a local API server
+- USDA FoodData Central and TheMealDB access through the local API server or Cloudflare Worker
 
 ## Source layout
 
 ```text
 App.js                  Main Expo application
+expiryNotifications.js  Local expiry reminder scheduling
 supabase.js              Supabase client configuration
 supabase/schema.sql     Pantry snapshot table and row-level security
 server/index.mjs         Local API for USDA and TheMealDB requests
+worker/index.js          Cloudflare API proxy for USDA and TheMealDB
+wrangler.jsonc           Cloudflare Worker deployment configuration
 .env.example             Safe template for local environment values
 app.json                 Expo app configuration
 package.json             Dependencies and development commands
@@ -60,15 +64,6 @@ The Expo entry point is `App.js`.
 The sample API URL `http://localhost:3001` is for an iOS simulator. For a physical phone, set `EXPO_PUBLIC_API_URL` to the computer's LAN IP, such as `http://192.168.1.20:3001`. Keep both devices on the same network. Restart Expo after changing environment values.
 
 Pantry tracking works offline without an account. USDA nutrition and recipe search need an internet connection and the local API server.
-
-## Supabase setup
-
-1. Create a Supabase project.
-2. In the Supabase SQL Editor, run [`supabase/schema.sql`](supabase/schema.sql).
-3. Put the project URL and publishable key in `.env`.
-4. Restart Expo and create an account in the app.
-
-Row-level security limits each account to its own pantry snapshot. The app does not use a `profiles` table or require a custom trigger on `auth.users`.
 
 ## Team
 
